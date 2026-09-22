@@ -1,0 +1,8 @@
+use_field_init_shorthand = true
+newline_style = "Unix"
+style_edition = "2021"
+
+# ------ cargo +nightly fmt -----
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+# --------------------------------

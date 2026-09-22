@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+
+members = ["crates/blockymodel", "crates/player"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Kept deliberately in lockstep with D:\work\ttc\Aether_terrain so these crates
+# can be moved into that workspace without a version dance. See
+# docs/porting-to-aether-terrain.md.
+[workspace.dependencies]
+# Graphics
+wgpu = "27"
+winit = { version = "0.30.12", features = ["serde"] }
+
+## Math
+vek = { version = "0.17.1", features = ["serde", "mint"] }
+
+## Serialization
+serde = { version = "1.0.118", features = ["derive"] }
+serde_json = "1.0.50"
+
+## Misc
+bytemuck = { version = "1.7", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+futures-lite = "2"
+
+# 默认配置文件,快速编译,运行效率足够好,没有调试信息
+[profile.dev]
+opt-level = 0
+overflow-checks = true
+debug-assertions = true
+panic = "abort"
+debug = 0
+lto = false
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+### LINTS ###
+[workspace.lints]
+rust.rust_2024_compatibility = { level = "warn", priority = 0 }
+rust.if_let_rescope = { level = "allow", priority = 1 }
+rust.tail_expr_drop_order = { level = "allow", priority = 1 }
+rust.edition_2024_expr_fragment_specifier = { level = "allow", priority = 1 }
+rust.keyword_idents_2024 = { level = "allow", priority = 1 }

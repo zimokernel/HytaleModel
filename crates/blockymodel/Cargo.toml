@@ -1,0 +1,15 @@
+[package]
+name = "blockymodel"
+description = "Parser, skeleton, mesh builder and animation sampler for Hytale .blockymodel / .blockyanim assets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

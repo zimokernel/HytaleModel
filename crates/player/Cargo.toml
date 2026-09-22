@@ -1,0 +1,29 @@
+[package]
+name = "blockyanim-player"
+description = "Interactive wgpu player for Hytale .blockymodel / .blockyanim assets"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "player"
+path = "src/main.rs"
+
+[dependencies]
+blockymodel = { path = "../blockymodel" }
+
+# Graphics
+wgpu = { workspace = true }
+winit = { workspace = true }
+
+## Math
+vek = { workspace = true }
+
+anyhow = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+env_logger = { workspace = true }
+futures-lite = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true
