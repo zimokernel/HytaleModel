@@ -12,7 +12,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{assets::AssetSet, camera::OrbitCamera, renderer::Renderer};
+use crate::{
+    assets::{AssetSet, CharacterPart},
+    camera::OrbitCamera,
+    renderer::Renderer,
+};
 
 const BACKGROUND: wgpu::Color = wgpu::Color {
     r: 0.055,
@@ -23,6 +27,7 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
 
 pub struct App {
     assets: AssetSet,
+    parts: Vec<CharacterPart>,
     mesh: Mesh,
     pose: Pose,
     camera: OrbitCamera,
@@ -42,7 +47,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(assets: AssetSet, initial_clip: Option<&str>) -> Self {
+    pub fn new(assets: AssetSet, parts: Vec<CharacterPart>, initial_clip: Option<&str>) -> Self {
         let mesh = assets.mesh_builder().build(&assets.skeleton);
         let pose = assets.skeleton.bind_pose();
 
@@ -59,6 +64,7 @@ impl App {
 
         Self {
             assets,
+            parts,
             mesh,
             pose,
             camera,
@@ -107,25 +113,39 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
-        let Some(clip) = self.assets.clips.get(self.clip_index) else {
+        let Some((duration, hold_last_keyframe)) = self
+            .assets
+            .clips
+            .get(self.clip_index)
+            .map(|clip| (clip.anim.duration_seconds(), clip.anim.hold_last_keyframe))
+        else {
             return;
         };
-        let duration = clip.anim.duration_seconds();
 
         if self.playing && duration > 0.0 {
             self.time += dt * self.speed;
-            if clip.anim.hold_last_keyframe {
+            if self.assets.clips.len() > 1 && hold_last_keyframe && self.time >= duration {
+                // One-shot clips are state-machine transitions. Looping clips
+                // such as Sit and Fly are stable states and must stay active.
+                self.select_clip((self.clip_index + 1) % self.assets.clips.len());
+            } else if hold_last_keyframe {
                 self.time = self.time.min(duration);
             } else {
                 self.time = self.time.rem_euclid(duration);
             }
         }
 
-        let before = self.time;
+        let Some(clip) = self.assets.clips.get(self.clip_index) else {
+            return;
+        };
         self.assets
             .skeleton
             .apply(&mut self.pose, Some(&clip.anim), self.time);
-        let _ = before;
+        for part in &mut self.parts {
+            part.asset
+                .skeleton
+                .apply(&mut part.pose, Some(&clip.anim), self.time);
+        }
         self.title_dirty = true;
     }
 
@@ -200,17 +220,29 @@ impl App {
             let Some(renderer) = &mut self.renderer else {
                 return Ok(());
             };
-            let bones = self.assets.skeleton.bone_matrices(&self.pose);
+            let base_bones = self.assets.skeleton.bone_matrices(&self.pose);
+            let mut all_bones = vec![base_bones];
+            for part in &self.parts {
+                all_bones.push(part.asset.skeleton.bone_matrices(&part.pose));
+            }
+            let bone_refs: Vec<&[blockymodel::BoneMatrix]> =
+                all_bones.iter().map(Vec::as_slice).collect();
             let aspect = renderer.size().0 as f32 / renderer.size().1.max(1) as f32;
-            renderer.update(self.camera.view_proj(aspect), &bones);
+            renderer.update(self.camera.view_proj(aspect), &bone_refs);
             renderer.render(BACKGROUND)?;
             return Ok(());
         };
 
         let _ = clip;
-        let bones = self.assets.skeleton.bone_matrices(&self.pose);
+        let base_bones = self.assets.skeleton.bone_matrices(&self.pose);
+        let mut all_bones = vec![base_bones];
+        for part in &self.parts {
+            all_bones.push(part.asset.skeleton.bone_matrices(&part.pose));
+        }
+        let bone_refs: Vec<&[blockymodel::BoneMatrix]> =
+            all_bones.iter().map(Vec::as_slice).collect();
         let aspect = renderer.size().0 as f32 / renderer.size().1.max(1) as f32;
-        renderer.update(self.camera.view_proj(aspect), &bones);
+        renderer.update(self.camera.view_proj(aspect), &bone_refs);
         renderer.render(BACKGROUND)
     }
 }
@@ -234,13 +266,22 @@ impl ApplicationHandler for App {
             }
         };
 
-        let renderer = match Renderer::new(
-            window.clone(),
+        let mut render_parts = vec![(
             &self.mesh,
-            &self.assets.texture_rgba,
+            self.assets.texture_rgba.as_slice(),
             self.assets.texture_size,
             self.assets.skeleton.len(),
-        ) {
+        )];
+        render_parts.extend(self.parts.iter().map(|part| {
+            (
+                &part.mesh,
+                part.asset.texture_rgba.as_slice(),
+                part.asset.texture_size,
+                part.asset.skeleton.len(),
+            )
+        }));
+
+        let renderer = match Renderer::new(window.clone(), &render_parts) {
             Ok(renderer) => renderer,
             Err(err) => {
                 log::error!("failed to initialise the renderer: {err:#}");

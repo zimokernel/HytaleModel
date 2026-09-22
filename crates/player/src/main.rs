@@ -23,6 +23,7 @@ struct Options {
     model: Option<PathBuf>,
     texture: Option<PathBuf>,
     animations: Option<PathBuf>,
+    parts: Vec<PathBuf>,
     clip: Option<String>,
     list: bool,
     info: bool,
@@ -59,6 +60,11 @@ fn parse_args() -> Result<Options> {
                         .ok_or_else(|| anyhow::anyhow!("--anim needs a name"))?,
                 );
             }
+            "--part" | "-p" => options
+                .parts
+                .push(PathBuf::from(args.next().ok_or_else(|| {
+                    anyhow::anyhow!("--part needs a .blockymodel path")
+                })?)),
             "--list" | "-l" => options.list = true,
             "--info" | "-i" => options.info = true,
             "--help" | "-h" => options.help = true,
@@ -82,6 +88,7 @@ OPTIONS:
     -t, --texture <PATH>     texture PNG                  [default: auto-discovered]
     -a, --anims <DIR>        animation root directory     [default: <asset>/Animations]
     -c, --anim <NAME>        clip to start on             [default: first alphabetically]
+    -p, --part <PATH>        extra Character attachment model (repeatable)
     -l, --list               list the discovered clips and exit
     -i, --info               print model details and exit
     -h, --help               show this help
@@ -131,11 +138,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let parts = options
+        .parts
+        .iter()
+        .map(|path| assets::CharacterPart::load(path, None))
+        .collect::<Result<Vec<_>>>()?;
+
     if assets.clips.is_empty() {
         log::warn!("no .blockyanim files found; showing the bind pose only");
     }
 
-    let mut app = app::App::new(assets, options.clip.as_deref());
+    let mut app = app::App::new(assets, parts, options.clip.as_deref());
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run_app(&mut app)?;

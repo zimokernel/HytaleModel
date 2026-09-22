@@ -30,9 +30,21 @@ cargo run -p blockyanim-player -- --anim Idle
 # 换一个资产
 cargo run -p blockyanim-player -- --model path/to/Model.blockymodel \
                                   --anims path/to/Animations
+
+# 播放 Character 主体和附件（--part 可重复）
+cargo run -p blockyanim-player -- \
+  --model assets/Characters/Player.blockymodel \
+  --anims assets/Characters/Animations \
+  --anim Idle \
+  --part assets/Characters/Haircuts/Bangs.blockymodel \
+  --part assets/Characters/Body_Attachments/Eyes/Eyes.blockymodel
 ```
 
+Character 的主体和附件是多个独立的 `.blockymodel`。用 `--part` 添加附件；每个附件保留自己的纹理和骨架，但会使用主体当前选择的 `.blockyanim` 按骨骼名同步播放。纹理会自动从模型目录、`Texture.png`、`<Model>_Texture.png` 或 `<Model>_Textures/` 中发现。
+
 ### 操作
+
+播放器默认让循环动作保持当前状态；一次性动作播放结束后按动作列表顺序进入下一个状态。手动切换动作后仍保留该状态机行为。
 
 | 输入 | 作用 |
 |---|---|

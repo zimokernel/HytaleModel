@@ -94,19 +94,9 @@ pub struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
-    bone_buffer: wgpu::Buffer,
-    bone_bind_group: wgpu::BindGroup,
     bone_bind_group_layout: wgpu::BindGroupLayout,
-
-    texture_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
-    texture_size: Vec2<f32>,
-
-    vertex_buffer: wgpu::Buffer,
-    index_buffer_single: wgpu::Buffer,
-    index_buffer_double: wgpu::Buffer,
-    index_count_single: u32,
-    index_count_double: u32,
+    parts: Vec<GpuPart>,
 
     depth_view: wgpu::TextureView,
     msaa_view: Option<wgpu::TextureView>,
@@ -114,18 +104,31 @@ pub struct Renderer {
     pub stats: FrameStats,
 }
 
+struct GpuPart {
+    bone_buffer: wgpu::Buffer,
+    bone_bind_group: wgpu::BindGroup,
+    texture_size: Vec2<f32>,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer_single: wgpu::Buffer,
+    index_buffer_double: wgpu::Buffer,
+    index_count_single: u32,
+    index_count_double: u32,
+}
+
 impl Renderer {
     pub fn new(
         window: std::sync::Arc<winit::window::Window>,
-        mesh: &Mesh,
-        texture_rgba: &[u8],
-        texture_size: (u32, u32),
-        bone_count: usize,
+        source_parts: &[(&Mesh, &[u8], (u32, u32), usize)],
     ) -> Result<Self> {
-        if bone_count > MAX_BONES {
-            return Err(anyhow!(
-                "the model has {bone_count} bones, more than the format's limit of {MAX_BONES}"
-            ));
+        if source_parts.is_empty() {
+            return Err(anyhow!("at least one model part is required"));
+        }
+        for (_, _, _, bone_count) in source_parts {
+            if *bone_count > MAX_BONES {
+                return Err(anyhow!(
+                    "a model part has {bone_count} bones, more than the format's limit of {MAX_BONES}"
+                ));
+            }
         }
 
         let size = window.inner_size();
@@ -266,16 +269,6 @@ impl Renderer {
                 ],
             });
 
-        // A fixed-capacity uniform array, exactly like the figure pipeline's
-        // bone buffer. 255 * 144 bytes = 36 KiB, under the 64 KiB default
-        // `maxUniformBufferBindingSize`.
-        let bone_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bones"),
-            size: (MAX_BONES * std::mem::size_of::<BoneData>()) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // Pixel art: nearest sampling keeps the 256x128 atlas crisp, and the
         // UV inset in the mesh builder handles any residual bleeding.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -288,38 +281,6 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-
-        let texture_view = create_texture(&device, &queue, texture_rgba, texture_size);
-
-        let bone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("model bind group"),
-            layout: &bone_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: bone_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer_single =
-            create_index_buffer(&device, "indices single sided", &mesh.indices_single);
-        let index_buffer_double =
-            create_index_buffer(&device, "indices double sided", &mesh.indices_double);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("model pipeline layout"),
@@ -348,6 +309,64 @@ impl Renderer {
 
         let attachments = Attachments::new(&device, &config, sample_count);
 
+        let mut parts = Vec::with_capacity(source_parts.len());
+        let mut vertices = 0;
+        let mut triangles = 0;
+        let mut bones = 0;
+        for (mesh, texture_rgba, texture_size, bone_count) in source_parts {
+            let texture_view = create_texture(&device, &queue, texture_rgba, *texture_size);
+            let bone_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("part bones"),
+                size: (MAX_BONES * std::mem::size_of::<BoneData>()) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("part bind group"),
+                layout: &bone_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: bone_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            });
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("part vertices"),
+                contents: bytemuck::cast_slice(&mesh.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            parts.push(GpuPart {
+                bone_buffer,
+                bone_bind_group,
+                texture_size: Vec2::new(texture_size.0 as f32, texture_size.1 as f32),
+                vertex_buffer,
+                index_buffer_single: create_index_buffer(
+                    &device,
+                    "part indices single sided",
+                    &mesh.indices_single,
+                ),
+                index_buffer_double: create_index_buffer(
+                    &device,
+                    "part indices double sided",
+                    &mesh.indices_double,
+                ),
+                index_count_single: mesh.indices_single.len() as u32,
+                index_count_double: mesh.indices_double.len() as u32,
+            });
+            vertices += mesh.vertices.len() as u32;
+            triangles += mesh.triangle_count() as u32;
+            bones += *bone_count as u32;
+        }
+
         Ok(Self {
             surface,
             device,
@@ -359,23 +378,15 @@ impl Renderer {
             pipeline_double,
             camera_buffer,
             camera_bind_group,
-            bone_buffer,
-            bone_bind_group,
             bone_bind_group_layout,
-            texture_view,
             sampler,
-            texture_size: Vec2::new(texture_size.0 as f32, texture_size.1 as f32),
-            vertex_buffer,
-            index_buffer_single,
-            index_buffer_double,
-            index_count_single: mesh.indices_single.len() as u32,
-            index_count_double: mesh.indices_double.len() as u32,
+            parts,
             depth_view: attachments.depth_view,
             msaa_view: attachments.msaa_view,
             stats: FrameStats {
-                vertices: mesh.vertices.len() as u32,
-                triangles: mesh.triangle_count() as u32,
-                bones: bone_count as u32,
+                vertices,
+                triangles,
+                bones,
                 draw_calls: 0,
             },
         })
@@ -406,79 +417,29 @@ impl Renderer {
         self.msaa_view = attachments.msaa_view;
     }
 
-    /// Swaps in a different model's geometry.
-    #[allow(dead_code)]
-    pub fn set_mesh(&mut self, mesh: &Mesh, bone_count: usize) {
-        self.vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vertices"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        self.index_buffer_single =
-            create_index_buffer(&self.device, "indices single sided", &mesh.indices_single);
-        self.index_buffer_double =
-            create_index_buffer(&self.device, "indices double sided", &mesh.indices_double);
-        self.index_count_single = mesh.indices_single.len() as u32;
-        self.index_count_double = mesh.indices_double.len() as u32;
-
-        self.stats.vertices = mesh.vertices.len() as u32;
-        self.stats.triangles = mesh.triangle_count() as u32;
-        self.stats.bones = bone_count as u32;
-    }
-
-    /// Replaces the model texture.
-    #[allow(dead_code)]
-    pub fn set_texture(&mut self, rgba: &[u8], size: (u32, u32)) {
-        self.texture_view = create_texture(&self.device, &self.queue, rgba, size);
-        self.texture_size = Vec2::new(size.0 as f32, size.1 as f32);
-        self.rebuild_bone_bind_group();
-    }
-
-    fn rebuild_bone_bind_group(&mut self) {
-        self.bone_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("model bind group"),
-            layout: &self.bone_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.bone_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-    }
-
     /// Uploads this frame's camera and bone data.
-    pub fn update(&mut self, view_proj: Mat4<f32>, bones: &[BoneMatrix]) {
+    pub fn update(&mut self, view_proj: Mat4<f32>, part_bones: &[&[BoneMatrix]]) {
         let camera = CameraUniform {
             view_proj: view_proj.into_col_arrays(),
         };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera));
 
-        let inv_texture_size = Vec2::new(
-            1.0 / self.texture_size.x.max(1.0),
-            1.0 / self.texture_size.y.max(1.0),
-        );
-
-        let upload: Vec<BoneData> = bones
-            .iter()
-            .take(MAX_BONES)
-            .map(|b| BoneData::new(b, inv_texture_size))
-            .collect();
-
-        if !upload.is_empty() {
+        for (part, bones) in self.parts.iter().zip(part_bones) {
+            let inv_texture_size = Vec2::new(
+                1.0 / part.texture_size.x.max(1.0),
+                1.0 / part.texture_size.y.max(1.0),
+            );
+            let upload: Vec<BoneData> = bones
+                .iter()
+                .take(MAX_BONES)
+                .map(|b| BoneData::new(b, inv_texture_size))
+                .collect();
+            if upload.is_empty() {
+                continue;
+            }
             self.queue
-                .write_buffer(&self.bone_buffer, 0, bytemuck::cast_slice(&upload));
+                .write_buffer(&part.bone_buffer, 0, bytemuck::cast_slice(&upload));
         }
     }
 
@@ -535,30 +496,29 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.bone_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-
             let mut draws = 0;
-
-            if self.index_count_single > 0 {
-                pass.set_pipeline(&self.pipeline_single);
-                pass.set_index_buffer(
-                    self.index_buffer_single.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..self.index_count_single, 0, 0..1);
-                draws += 1;
-            }
-
-            if self.index_count_double > 0 {
-                pass.set_pipeline(&self.pipeline_double);
-                pass.set_index_buffer(
-                    self.index_buffer_double.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..self.index_count_double, 0, 0..1);
-                draws += 1;
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            for part in &self.parts {
+                pass.set_bind_group(1, &part.bone_bind_group, &[]);
+                pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
+                if part.index_count_single > 0 {
+                    pass.set_pipeline(&self.pipeline_single);
+                    pass.set_index_buffer(
+                        part.index_buffer_single.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..part.index_count_single, 0, 0..1);
+                    draws += 1;
+                }
+                if part.index_count_double > 0 {
+                    pass.set_pipeline(&self.pipeline_double);
+                    pass.set_index_buffer(
+                        part.index_buffer_double.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..part.index_count_double, 0, 0..1);
+                    draws += 1;
+                }
             }
 
             self.stats.draw_calls = draws;

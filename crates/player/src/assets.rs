@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use blockymodel::{BlockyAnim, BlockyModel, MeshBuilder, Skeleton};
+use blockymodel::{BlockyAnim, BlockyModel, Mesh, MeshBuilder, Pose, Skeleton};
 
 /// One loadable animation clip.
 pub struct Clip {
@@ -25,12 +25,38 @@ pub struct AssetSet {
     pub clips: Vec<Clip>,
 }
 
+/// A renderable model that shares the animation clip selected for the main
+/// character, but keeps its own skeleton and texture.
+pub struct CharacterPart {
+    pub asset: AssetSet,
+    pub mesh: Mesh,
+    pub pose: Pose,
+}
+
+impl CharacterPart {
+    pub fn load(model_path: &Path, texture_path: Option<&Path>) -> Result<Self> {
+        let asset = AssetSet::load_impl(model_path, texture_path, None, false)?;
+        let mesh = asset.mesh_builder().build(&asset.skeleton);
+        let pose = asset.skeleton.bind_pose();
+        Ok(Self { asset, mesh, pose })
+    }
+}
+
 impl AssetSet {
     /// Loads a model, its texture and every animation next to it.
     pub fn load(
         model_path: &Path,
         texture_path: Option<&Path>,
         anim_root: Option<&Path>,
+    ) -> Result<Self> {
+        Self::load_impl(model_path, texture_path, anim_root, true)
+    }
+
+    fn load_impl(
+        model_path: &Path,
+        texture_path: Option<&Path>,
+        anim_root: Option<&Path>,
+        discover_anims: bool,
     ) -> Result<Self> {
         let model = BlockyModel::from_path(model_path)
             .with_context(|| format!("loading model {}", model_path.display()))?;
@@ -56,7 +82,8 @@ impl AssetSet {
 
         let anim_root = match anim_root {
             Some(p) => Some(p.to_path_buf()),
-            None => discover_animations_root(model_dir),
+            None if discover_anims => discover_animations_root(model_dir),
+            None => None,
         };
 
         let mut clips = match &anim_root {
@@ -199,6 +226,23 @@ fn discover_texture(model_dir: &Path, model_path: &Path) -> Result<PathBuf> {
     for candidate in candidates {
         if candidate.is_file() {
             return Ok(candidate);
+        }
+    }
+
+    let texture_dir = model_dir.join(format!("{stem}_Textures"));
+    if let Ok(entries) = std::fs::read_dir(texture_dir) {
+        let mut pngs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+            })
+            .collect();
+        pngs.sort();
+        if let Some(first) = pngs.into_iter().next() {
+            return Ok(first);
         }
     }
 
