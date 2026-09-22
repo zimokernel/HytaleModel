@@ -1,11 +1,14 @@
-# HytaleAnim
+# HytaleModel
 
 Hytale `.blockymodel` / `.blockyanim` 的格式文档 + Rust/wgpu 播放器。
 
 目标是把 Hytale 官方的 Blockbench 资产工作流完整用起来：**直接读游戏导出的资产，不经过任何中间转换**。
 
 ```
-docs/blockymodel-format.md          # 格式规范（中文，含逐行验证过的 UV 与插值语义）
+docs/blockymodel-spec.md            # .blockymodel 格式规范（规范性定义：字段、约束、UV、几何、bind pose）
+docs/blockyanim-spec.md             # .blockyanim 格式规范（规范性定义：通道、求值、插值、边界情况）
+docs/blockymodel-format.md          # 实现笔记与踩坑清单（Rust/wgpu、移植清单）
+docs/hytale-format-public-docs-survey.md  # 公开资料调研：哪些来源可信、哪些是伪造的
 docs/porting-to-aether-terrain.md   # 移植到 D:\work\ttc\Aether_terrain 的清单
 crates/blockymodel/                 # 解析 + 骨架 + 网格 + 动画采样（无 GPU 依赖）
 crates/player/                      # 交互式播放器（wgpu 27 + winit 0.30）

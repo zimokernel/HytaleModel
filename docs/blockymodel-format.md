@@ -25,6 +25,10 @@
 > 配套实现：`crates/blockymodel`（解析 + 骨骼 + 网格 + 动画采样）与 `crates/player`（wgpu 27 + winit 0.30 交互播放器）。
 > 两者都对齐 `D:\work\ttc\Aether_terrain` 的版本与数学类型，见第 12 节。
 
+> 📄 **正式规范已拆分**：本文现在定位为「实现笔记 / 踩坑记录」。
+> 逐字段的规范性定义见 [`blockymodel-spec.md`](./blockymodel-spec.md)（`.blockymodel`）与 [`blockyanim-spec.md`](./blockyanim-spec.md)（`.blockyanim`）；
+> 两者包含 RFC 2119 措辞的强制等级、完整的采样伪代码、写入者清单与来源考证。
+
 ---
 
 ## 1. 先搞清楚文件扩展名
@@ -457,7 +461,9 @@ Hytale 的贴图是**像素艺术**（Dog 的 `Texture.png` 是 256×128），�
 | `shapeVisible` | visibility | 可见性（布尔） |
 | `shapeUvOffset` | uv_offset | UV 像素偏移 |
 
-**Dog 的 15 个动作实际只用了 `orientation`(1000 帧)、`position`(118)、`shapeStretch`(50)**，另外两个通道没出现 —— 但实现时要支持，别的资产会用。
+**Dog 的 15 个动作实际只用了 `orientation`(1000 帧)、`position`(118)、`shapeStretch`(50)**；
+`shapeVisible` 和 `shapeUvOffset` 这两个**键存在于每个骨骼上，但数组总是空的**（官方插件的输出习惯是「有数据就补齐所有通道键」）。
+不过实现时仍要支持它们 —— 别的资产（滚动贴图、眨眼、`Death` 之外的可见性切换）会用，见 9.2.3。
 
 ### 8.2 关键帧
 
@@ -471,7 +477,11 @@ Hytale 的贴图是**像素艺术**（Dog 的 `Texture.png` 是 256×128），�
 
 * `time` 单位是**帧**（60 fps）。`time / 60.0` 秒。
 * `delta` 的具体形状取决于通道（见 8.3）。
-* `interpolationType` **只出现在部分关键帧上**（Dog 的 `Idle` 里 Pelvis.orientation 第 2 帧就没有这个字段）→ 必须当可选处理。
+* `interpolationType` 在格式上是**可选的**（缺失视为 `"linear"`），所以 serde 结构体上必须带 `#[serde(default)]`。
+
+> **实测更正**：本文早期版本称「`interpolationType` 只出现在部分关键帧上」，这是**错的**。
+> 对整个 `Pets/Dog/Animations/` 做全量统计：**1168 个关键帧中 0 个缺失该字段，取值 100% 是 `"smooth"`**。
+> 把它当可选处理仍然正确（Blockbench 可以写出 `"linear"`，官方插件也只写 `"smooth"` / `"linear"` 两种），但不要拿 Dog 当「字段缺失」的例子。
 
 ### 8.3 `delta` 的四种形状
 
@@ -487,7 +497,7 @@ Hytale 的贴图是**像素艺术**（Dog 的 `Texture.png` 是 256×128），�
 
 ### 8.4 骨骼名不一定存在于模型里
 
-Dog 的动画里出现了 `Collar`、`TailDog` 这两个 **`Model.blockymodel` 里根本没有的骨骼名**（还有 `L-Eye`/`R-Eye` 等存在但只动一部分的）。
+Dog 的动画里出现了 `Collar`、`R-Ear2`、`TailDog` 这三个 **`Model.blockymodel` 里根本没有的骨骼名**（模型共 30 个名字，动画共引用 31 个）。
 
 **结论：按名字绑定，找不到就静默跳过，绝对不能报错。** 这些动画是跨资产变体复用的。
 
@@ -510,8 +520,8 @@ t_seconds = frame / 60.0
 | `position` | `pos_final = node.position + delta` | **向量加法** |
 | `orientation` | `q_final = node.orientation ⊗ q_delta` | **四元数乘法，bind 在左** |
 | `shapeStretch` | `stretch_final = shape.stretch * delta` | **逐分量乘法**（不是加法！） |
-| `shapeVisible` | `visible = delta` | 绝对值，非增量 |
-| `shapeUvOffset` | `uv_offset_px = (delta.x, -delta.y)` | 加到 UV 矩形上 |
+| `shapeVisible` | `visible = delta` | 绝对值，非增量。**不做插值**，见 9.2.3 |
+| `shapeUvOffset` | `uv_offset_px = (delta.x, -delta.y)` | 加到 UV 矩形上。**不做插值**，见 9.2.3 |
 
 四元数乘法的顺序非常重要。`bind ⊗ delta` 表示「delta 是在骨骼自己的局部坐标系里施加的旋转」，这与 Blockbench 的 `bone.quaternion.multiply(q_delta)`（`this = this * q`）一致。
 
@@ -556,7 +566,7 @@ fn weighted_cubic_bezier(t: f32) -> f32 {
 
 这是 `smoothstep` 的一个近似但不完全相同的版本 —— 用它，不要用 `t*t*(3-2t)`，否则会看到细微差别。
 
-#### 9.2.2 其它通道（`position` / `shapeStretch` / `shapeUvOffset` / `shapeVisible`）
+#### 9.2.2 走样条的通道（`position` / `shapeStretch`）
 
 ```
 if A.interpolation == "linear" && (B.interpolation == "linear" || B.interpolation == "step"):
@@ -593,7 +603,25 @@ fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 
 > **反直觉但必须照做**：Blockbench 的 `SplineCurve` 在**索引空间**里参数化，而不是时间空间。也就是说，关键帧之间「时间间隔不均匀」并不会让样条在时间上被拉伸。上面的 `alpha` 就是段内归一化参数，直接喂给 `t` 即可 —— 这正是 Blockbench 的行为（`getCatmullromLerp`，`keyframe.js:227-239`）。
 >
-> `shapeVisible`（布尔）没有插值概念，取 `A` 的值即可。
+> 另一条同样反直觉的细节：缺邻居时 THREE.js 是**复制端点**（`P0 = P1` / `P3 = P2`）而不是线性外推，所以只有 2 个关键帧的轨道**不是**直线。`catmull_rom(1, 1, 3, 3, 0.25) = 1.40625`，线性值才是 `1.5`。
+
+#### 9.2.3 不插值的通道（`shapeVisible` / `shapeUvOffset`）
+
+这两个通道**完全不走 `interpolate()`**，而是各自有专门的显示回调：
+
+```
+value(t) = 满足 time <= t 的关键帧中 time 最大者的 delta
+如果不存在这样的关键帧：
+    shapeVisible  → 该通道「无值」→ 回退到模型里这个 shape 的 visible 标志
+    shapeUvOffset → 偏移视为 (0, 0)
+```
+
+证据：
+
+* `src/animations.ts` 的 `displayVisibility` / `displayUVOffset` 都只做「找最后一个 `time <= Timeline.time` 的关键帧」；
+* Blockbench 的 `displayFrame()` 只对 `rotation` / `position` / `scale` 调用 `interpolate()`，剩下两个通道靠 `channels[channel].displayFrame` 回调（`timeline_animators.js:596-604`）。
+
+> **实现更正**：本文早期版本把 `shapeUvOffset` 列进了「Catmull-Rom 插值」那一组，这是**错的** —— 它是抽帧（hold）语义，滚动贴图/眨眼不会平滑过渡。`shapeVisible` 也同理（早期版本说「取 A 的值」，只对了一半：正确的规则是「取最后一个 ≤ t 的关键帧」，而且在没有任何 ≤ t 的关键帧时回退到 shape 自身的 `visible`，而不是取轨道第一个关键帧）。
 
 ### 9.3 边界情况：单关键帧 / 时间在范围外
 
@@ -650,7 +678,7 @@ let t = (elapsed_seconds * speed) % (duration / 60.0);   // 循环
 6. **UV 的 `offset` 是像素，不是归一化值**；且 `mirror.x` 意味着矩形从 offset **向左**延伸。
 7. **`shapeStretch` 动画是乘法合成**：`bind_stretch * delta`。
 8. **四元数合成顺序是 `bind ⊗ delta`**，反过来会让所有旋转都跑到错误的轴上。
-9. **旋转通道用 SLERP + 缓动；平移/缩放通道用 Catmull-Rom**。两者不是同一套插值。
+9. **三条插值路径**：旋转通道用 SLERP + 加权贝塞尔缓动；平移/缩放通道用 Catmull-Rom；**`shapeVisible` / `shapeUvOffset` 完全不插值**（取最后一个 `time <= t` 的关键帧）。把它们混成一类会得到错误的姿势。
 10. **`duration` 是帧不是秒**，恒定 60 fps。
 11. **循环动画的尾段会回绕到第一个关键帧**，不是简单钳制。
 12. **quad 只查 `textureLayout["front"]`**，而且 size 只有两个分量。
@@ -932,8 +960,20 @@ address_mode_*: wgpu::AddressMode::ClampToEdge,
 | 贴图 | `Texture.png`，256 × 128，`Format32bppArgb` |
 | 包围盒（bind pose，含旋转） | min `(-21.95, -0.34, -43.76)` / max `(21.95, 88.20, 51.15)` |
 | 尺寸 | `43.90 × 88.54 × 94.91` 单位 ≈ `0.69 × 1.38 × 1.48` 方块 |
-| 生成几何 | 148 个面 → 592 顶点 / 296 三角形（13 个面没有 `textureLayout`，不生成） |
+| 生成几何 | 148 个面 → 592 顶点 / 296 三角形（26 个 box 共 156 个潜在面中 13 个没有 UV 条目，不生成；5 个 quad 全部生成） |
 | 重名骨骼 | `L-Ear2`（`R-Ear` 的子节点被误命名成了 `L-Ear2`） |
+| `settings` 里的键 | 只有 `size`（没有 `isPiece`，也没有 `isStaticBox`） |
+| 有 `children` 键的节点 | 31 / 31（官方插件会在没有子节点时省略该键，游戏资产不省） |
+| 负 `stretch` 的形状 | **8 个**，全部是 `x < 0`（见下） |
+| `visible` 取值 | 全部 `true` |
+| quad 的 `settings.normal` | **全部缺失**（按缺省 `+Z` 处理） |
+
+> **负 `stretch` 是真实存在的，不是理论边界。** `Pets/Dog` 里有 8 个形状的 `stretch.x` 为负，
+> 而且**全部是奇数个负轴**（`oddFlips = 1`）：`L-Ear`、`L-Ear2`、`R-UpperLeg`、`R-Leg`、`R-Foot`、
+> `R-BackUpperLeg`、`R-BackLeg`、`R-BackFoot`。
+>
+> 也就是说，**如果一个渲染器忘了按奇偶翻转绕序，这条狗的整个右半边（加左耳）会全部被背面剔除掉**，
+> 而 `cargo check`、单元测试、甚至「看起来能跑」都不会告诉你。测试里必须钉住这一点。
 
 > 上面这些数字可以用本文配套的播放器一键复现：
 > `cargo run -p blockyanim-player -- --info`
@@ -1005,6 +1045,11 @@ Pelvis
 
 **文档**
 
-* [Hytale Docs — 3D Models](https://hytale-docs.com/docs/modding/art-assets/models)
-* [Hytale Docs — Blockbench Modeling Guide](https://hytale-docs.com/docs/tools/blockbench/modeling)
-* [Hytale 官方博客 — Introduction to Making Models for Hytale](https://hytale.com/news/2025/12/an-introduction-to-making-models-for-hytale)
+* [Hytale 官方博客 — Introduction to Making Models for Hytale](https://hytale.com/news/2025/12/an-introduction-to-making-models-for-hytale) —— **可信**。给出「只用 cube 与 quad、不允许球体」、贴图宽高必须是 32 的整数倍、64/32 密度、`stretch` 建议 0.7–1.3×、不用 PBR
+* [Hytale Wiki — Technical:Documentation](https://hytalewiki.org/w/Technical:Documentation) —— 官方「正在准备 GitBook 文档，但目前没有官方技术文档」的出处
+* `ref/hytale-blockbench-plugin/dist/about.md` —— **可信，且是一级来源**。插件发行包内的官方格式指南：255 节点规则与计数口径、Position/Rotation 打 group 而 Scale/Visibility/UV Offset 只打 shape
+* [HytaleModding 社区文档](https://github.com/HytaleModding/site) —— 可信（工作流与集成示例）
+* ⚠️ [Hytale Docs — 3D Models](https://hytale-docs.com/docs/modding/art-assets/models) —— **不可信**。该页印的是一套虚构的 Minecraft Bedrock / GeckoLib 风格 schema（`format_version`、`model.identifier`、`bones[].pivot`、`inflate`、「1 pixel = 1/16 block」），与真实格式的每一个特征字段都矛盾。**不要引用、不要照它实现。** 逐条对照见 [`blockymodel-spec.md` 附录 E](./blockymodel-spec.md#附录-e伪造的公开-schema-警示)
+* ⚠️ [Hytale Docs — Textures](https://hytale-docs.com/docs/modding/art-assets/textures) —— 掺入无出处的说法（512×512 上限、`_emissive.png`、动画贴图 JSON、必须为 2 的幂），无法佐证
+
+> 完整的公开资料调研（逐条引用、非存在页面的验证、来源权威性分级）见 [`hytale-format-public-docs-survey.md`](./hytale-format-public-docs-survey.md)。
